@@ -124,7 +124,7 @@ python prepare_samples.py --config config.yaml
 ```yaml
 sampling:
   sample_stride: 40
-  max_samples: 1000
+  max_samples: 50
 ```
 
 `max_samples` 是最终样本数量上限，`sample_stride` 是中心帧抽样间隔。实际数量还会受到 4 秒完整窗口、六视角完整性、boxes、候选数量和行驶状态筛选等条件影响。
