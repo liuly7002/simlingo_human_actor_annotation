@@ -43,7 +43,7 @@ _remove_unsupported_socks_proxy_env()
 import gradio as gr
 
 from annotation_core.config import load_config
-from annotation_core.dataset import load_jsonl
+from annotation_core.dataset import MANIFEST_SCHEMA_VERSION, load_jsonl
 from annotation_core.render import candidate_table, render_sample_assets
 from annotation_core.storage import (
     append_annotation,
@@ -92,16 +92,15 @@ def build_app(config_path: str, default_annotator_id: str = "") -> gr.Blocks:
             "请先运行 prepare_samples.py。"
         )
     if any(
-        int(sample.get("schema_version", 1)) < 2
+        int(sample.get("schema_version", 0)) != MANIFEST_SCHEMA_VERSION
         or int(sample.get("history_frames", 0)) < 20
         or int(sample.get("future_frames", 0)) < 20
         for sample in samples
     ):
         raise RuntimeError(
-            "检测到第一版或不足 4 秒的 manifest。请先运行：\n"
-            "  python upgrade_config_v2.py --config config.yaml\n"
-            "  python prepare_samples.py --config config_v2.yaml\n"
-            "然后使用 config_v2.yaml 启动界面。"
+            "检测到不兼容或不足 4 秒的 manifest。请删除旧 manifest 后重新运行：\n"
+            "  python prepare_samples.py --config config.yaml\n"
+            "然后继续使用 config.yaml 启动标注界面。"
         )
 
     def _progress(index: int, annotator_id: str) -> str:

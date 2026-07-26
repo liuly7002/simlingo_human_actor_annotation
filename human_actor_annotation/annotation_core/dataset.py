@@ -11,6 +11,9 @@ from .actors import load_normalized_actors, read_json_auto, select_candidates
 from .config import ProjectConfig
 
 
+MANIFEST_SCHEMA_VERSION = 1
+
+
 VIEW_ORDER = (
     "front_left",
     "front",
@@ -435,7 +438,7 @@ def prepare_manifest(config: ProjectConfig) -> Dict[str, int]:
                 "unknown" if motion_status == "unknown" else "stationary"
             )
             record = {
-                "schema_version": 2,
+                "schema_version": MANIFEST_SCHEMA_VERSION,
                 "sample_id": sample_id,
                 "route_name": route_name(route_dir, dataset_root),
                 "route_dir": _relative_or_absolute(route_dir, dataset_root),

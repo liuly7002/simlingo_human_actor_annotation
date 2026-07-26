@@ -1,8 +1,5 @@
 # SimLingo 关键 Actor 人工盲评标注工具
 
-> 第二版改进：问题定义更明确；Top RGB 编号自动避让并始终保持在图内；
-> 六视角片段扩展为约 4 秒；优先抽取自车行驶状态，同时保留少量必要停车场景。
-
 该项目用于对 `simlingo_liulei` 生成的关键 actor 进行独立人工验证。它直接读取 `data_collection.py` 收集的数据，不读取或展示 LG 选择结果、语言内容和 causal score，从而避免测试人员受到方法输出影响。
 
 ## 1. 已实现功能
@@ -34,9 +31,10 @@ human_actor_annotation/
 ├── inspect_dataset.py             # 检查真实数据目录和 boxes 字段
 ├── assign_samples.py              # 多人均衡分配样本
 ├── evaluate_annotations.py        # 汇总一致性并与 LG 结果比较
-├── config.example.yaml            # 第二版配置模板
-├── upgrade_config_v2.py           # 将第一版 config 复制升级为第二版
+├── config.example.yaml            # 配置模板
 ├── requirements.txt
+├── VERSION
+├── .gitignore
 ├── run_annotation.sh
 ├── annotation_core/
 │   ├── actors.py
@@ -79,6 +77,8 @@ dataset:
 
 `dataset_root` 应指向 `data_collection.py` 生成目录中的 `data` 层。程序会继续向下递归寻找包含六视角文件夹的路线目录。
 
+`config.yaml` 包含本机绝对路径，已由 `.gitignore` 排除，不应提交到 Git。仓库只保留可公开复制的 `config.example.yaml`。
+
 ## 5. 先检查数据结构
 
 ```bash
@@ -102,35 +102,40 @@ x_m：自车前向距离
 
 当前项目按 CARLA/Unreal 自车坐标约定绘制：`x` 向前、`y` 向右。
 
-## 6. 生成第二版标注样本
+## 6. 生成标注样本
 
-从第一版项目升级时，先生成独立的第二版配置和工作目录：
-
-```bash
-python upgrade_config_v2.py --config config.yaml
-```
-
-该命令默认生成 `config_v2.yaml`，并使用 `annotation_workspace_v2`，避免把第一版试标结果混入第二版。然后运行：
+复制并修改配置后，直接运行：
 
 ```bash
-python prepare_samples.py --config config_v2.yaml
+python prepare_samples.py --config config.yaml
 ```
 
-全新使用时，也可以直接复制 `config.example.yaml` 为 `config.yaml`。第二版默认设置为：
+默认设置为：
 
 - 历史 20 帧、当前 1 帧、未来 20 帧，10 FPS 下首尾时间跨度约 4 秒；
-- 每隔 40 帧抽取一次，降低相邻 4 秒片段的重复；
-- 自车中心速度达到 1.0 m/s，或片段中至少 50% 有效帧达到 1.0 m/s，即视为行驶片段；
+- 每隔 40 帧抽取一次，降低相邻片段的重复；
+- 自车中心速度达到 1.0 m/s，或片段中至少 50% 的有效帧达到 1.0 m/s，即视为行驶片段；
 - 优先保留行驶片段，静止片段最多占 10%，用于红灯、排队、障碍停车等必要场景；
 - 最多生成 1000 条；
-- 每条最多展示 20 个候选 actor；默认跳过超限样本，同时保留零候选帧作为“无关键 actor”负样本。
+- 每条最多展示 20 个候选 actor；默认跳过候选被截断的样本，同时保留零候选帧作为“无关键 actor”负样本。
 
-`prepare_summary.json` 会额外记录：
+标注样本数量主要由以下配置控制：
 
+```yaml
+sampling:
+  sample_stride: 40
+  max_samples: 1000
+```
+
+`max_samples` 是最终样本数量上限，`sample_stride` 是中心帧抽样间隔。实际数量还会受到 4 秒完整窗口、六视角完整性、boxes、候选数量和行驶状态筛选等条件影响。
+
+`prepare_summary.json` 会记录：
+
+- `samples_written`；
 - `moving_samples_written`；
 - `stationary_samples_written`；
 - `motion_unknown_samples_written`；
-- `skipped_stationary`。
+- 各类跳过原因。
 
 输出：
 
@@ -140,14 +145,14 @@ annotation_workspace/
 └── prepare_summary.json
 ```
 
-预处理阶段只建立 manifest，不会一次性生成全部视频。标注界面打开某个样本时才生成并缓存该样本的视频，避免预处理耗时和磁盘占用过大。
+预处理阶段只建立 manifest，不会一次性生成全部视频。标注界面打开某个样本时才生成并缓存视频，避免预处理耗时和磁盘占用过大。
 
 ## 7. 启动标注界面
 
 单机：
 
 ```bash
-python annotation_app.py --config config_v2.yaml --annotator-id P01
+python annotation_app.py --config config.yaml --annotator-id P01
 ```
 
 浏览器打开：
@@ -360,6 +365,8 @@ render:
 python tests/smoke_test.py
 ```
 
+测试产生的 `config.demo.yaml`、`demo_dataset/` 和 `demo_workspace/` 已由 `.gitignore` 排除。
+
 该测试会验证：
 
 - 六视角目录发现；
@@ -403,7 +410,7 @@ export ALL_PROXY=socks5://127.0.0.1:7897
 
 ## 视频区域空白的修复
 
-项目现在会把 OpenCV 中间视频转码为浏览器兼容的 H.264/yuv420p MP4，旧版 `mp4v` 缓存会自动重建。
+项目现在会把 OpenCV 中间视频转码为浏览器兼容的 H.264/yuv420p MP4，`mp4v` 格式的不兼容缓存会自动重建。
 若终端打印“未找到 FFmpeg”，执行：
 
 ```bash
