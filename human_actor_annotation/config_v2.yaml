@@ -1,0 +1,90 @@
+dataset:
+  dataset_root: /home/liulei/ll/simlingo_liulei/database/simlingo_v2_2026_07_25_15_05_25/data
+  work_dir: annotation_workspace_v2
+  manifest_path: annotation_workspace_v2/manifest.jsonl
+  annotation_dir: annotation_workspace_v2/annotations
+  view_aliases:
+    front_left:
+    - rgb_front_left
+    - rgb_left_front
+    front:
+    - rgb_front
+    - rgb
+    front_right:
+    - rgb_front_right
+    - rgb_right_front
+    rear_left:
+    - rgb_rear_left
+    - rgb_left_rear
+    - rgb_left_back
+    rear:
+    - rgb_rear
+    - rgb_back
+    rear_right:
+    - rgb_rear_right
+    - rgb_right_rear
+    - rgb_right_back
+  top_rgb_aliases:
+  - top_rgb
+  boxes_aliases:
+  - boxes
+  measurements_aliases:
+  - measurements
+sampling:
+  history_frames: 20
+  future_frames: 20
+  sample_stride: 40
+  max_samples: 1000
+  random_seed: 20260726
+  require_all_six_views: true
+  require_top_rgb: true
+  require_boxes: true
+  max_candidates: 20
+  skip_if_candidates_truncated: true
+  include_empty_candidate_samples: true
+  max_actor_distance_m: 50.0
+  min_actor_forward_m: -8.0
+  prefer_moving_samples: true
+  min_ego_speed_mps: 1.0
+  min_window_moving_ratio: 0.5
+  max_stationary_sample_ratio: 0.1
+  keep_if_motion_unknown: true
+  include_classes:
+  - vehicle
+  - car
+  - truck
+  - bus
+  - motorcycle
+  - bicycle
+  - cyclist
+  - pedestrian
+  - walker
+  - static
+  - obstacle
+  - traffic_cone
+  - cone
+  exclude_classes:
+  - ego
+  - ego_vehicle
+  - ego_car
+  - hero
+render:
+  fps: 10
+  mosaic_width: 1280
+  current_mosaic_width: 1280
+  top_preview_width: 720
+  marker_radius_px: 18
+  marker_anchor_radius_px: 5
+  marker_label_gap_px: 10
+  top_meters_per_pixel: null
+  top_ego_center_x_ratio: 0.5
+  top_ego_center_y_ratio: 0.5
+  forward_is_up: true
+  right_is_right: true
+app:
+  host: 127.0.0.1
+  port: 7860
+  share: false
+  show_candidate_table: true
+  allow_notes: true
+  title: 关键 Actor 人工盲评标注
