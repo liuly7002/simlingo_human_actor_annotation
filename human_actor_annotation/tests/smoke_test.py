@@ -31,8 +31,8 @@ def main() -> None:
   manifest_path: {DEMO_WORKSPACE / 'manifest.jsonl'}
   annotation_dir: {DEMO_WORKSPACE / 'annotations'}
 sampling:
-  history_frames: 20
-  future_frames: 20
+  history_frames: 40
+  future_frames: 0
   sample_stride: 40
   max_samples: 1
   max_candidates: 12
@@ -68,7 +68,12 @@ app:
     cfg = load_config(CONFIG)
     samples = load_jsonl(cfg.dataset.manifest_path)
     assert samples, "manifest should contain samples"
-    assert len(samples[0]["frames"]) == 41, "4-second clip should contain 41 frames at 10 FPS"
+    assert len(samples[0]["frames"]) == 41, "4-second history clip should contain 41 frames at 10 FPS"
+    assert samples[0]["history_frames"] == 40
+    assert samples[0]["future_frames"] == 0
+    assert samples[0]["center_frame_offset"] == 40
+    assert samples[0]["center_frame_offset"] == len(samples[0]["frames"]) - 1
+    assert samples[0]["frames"][-1]["stem"] == samples[0]["center_stem"]
     assert samples[0].get("motion_class") == "moving"
 
     from annotation_core.render import _layout_candidate_labels

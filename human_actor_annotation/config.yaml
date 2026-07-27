@@ -21,9 +21,10 @@ dataset:
   measurements_aliases: [measurements]
 
 sampling:
-  # 10 FPS 数据下，前后各 20 帧，首尾时间跨度约 4 秒。
-  history_frames: 20
-  future_frames: 20
+  # 10 FPS 数据下，使用当前时刻之前 40 帧和当前帧，首尾时间跨度约 4 秒。
+  # 不提供未来帧，视频最后一帧就是当前标注时刻。
+  history_frames: 40
+  future_frames: 0
 
   # 每隔 40 帧抽取一条，减少 4 秒片段之间的重复。
   sample_stride: 40

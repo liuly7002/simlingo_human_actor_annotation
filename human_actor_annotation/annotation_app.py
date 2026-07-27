@@ -56,6 +56,8 @@ NO_ATTENTION_VALUE = "__NO_ATTENTION__"
 UNCERTAIN_VALUE = "__UNCERTAIN__"
 NO_ATTENTION_LABEL = "没有需要重点关注的对象"
 UNCERTAIN_LABEL = "画面信息不足，无法判断"
+EXPECTED_HISTORY_FRAMES = 40
+EXPECTED_FUTURE_FRAMES = 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,21 +114,41 @@ def build_app(config_path: str, default_annotator_id: str = "") -> gr.Blocks:
         )
     if any(
         int(sample.get("schema_version", 0)) != MANIFEST_SCHEMA_VERSION
-        or int(sample.get("history_frames", 0)) < 20
-        or int(sample.get("future_frames", 0)) < 20
+        or int(sample.get("history_frames", -1)) != EXPECTED_HISTORY_FRAMES
+        or int(sample.get("future_frames", -1)) != EXPECTED_FUTURE_FRAMES
+        or int(sample.get("center_frame_offset", -1)) != EXPECTED_HISTORY_FRAMES
+        or int(sample.get("center_frame_offset", -1)) != len(sample.get("frames", [])) - 1
         for sample in samples
     ):
         raise RuntimeError(
-            "检测到不兼容或不足 4 秒的 manifest。请删除旧 manifest 后重新运行：\n"
-            "  python prepare_samples.py --config config.yaml\n"
-            "然后继续使用 config.yaml 启动标注界面。"
+            "检测到不是‘约 4 秒历史画面，并在当前时刻结束’布局的 manifest。\n"
+            "请确认 config.yaml 中设置：\n"
+            "  sampling.history_frames: 40\n"
+            "  sampling.future_frames: 0\n"
+            "然后删除旧 manifest 并重新运行：\n"
+            "  python prepare_samples.py --config config.yaml"
+        )
+
+    sample_ids = {str(sample["sample_id"]) for sample in samples}
+
+    def _completed_sample_count(annotator_id: str) -> int:
+        latest = load_latest_annotations(config.dataset.annotation_dir, annotator_id)
+        return sum(sample_id in latest for sample_id in sample_ids)
+
+    def _completion_status(last_message: str = "") -> str:
+        details = f"{last_message}\n\n" if last_message else ""
+        return (
+            "## ✅ 全部标注完成\n"
+            f"{details}当前标注任务中的 **{len(samples)}/{len(samples)}** 个样本均已处理，"
+            "标注结果已经保存。你可以关闭页面，或使用“上一条”回看并修订已有标注。"
         )
 
     def _progress(index: int, annotator_id: str) -> str:
         if not annotator_id.strip():
             return f"样本总数：**{len(samples)}**。请先输入标注员编号并开始。"
-        latest = load_latest_annotations(config.dataset.annotation_dir, annotator_id)
-        completed = len(latest)
+        completed = _completed_sample_count(annotator_id)
+        if completed >= len(samples):
+            return f"## ✅ 标注任务已完成　｜　进度：**{len(samples)}/{len(samples)}**"
         return (
             f"进度：**{completed}/{len(samples)}**　｜　"
             f"当前序号：**{index + 1}/{len(samples)}**"
@@ -158,7 +180,7 @@ def build_app(config_path: str, default_annotator_id: str = "") -> gr.Blocks:
             gr.update(choices=choices, value=[]),
             3,
             "",
-            "请先观看短片，再根据中心帧 Top RGB 中的匿名编号作答。",
+            "请先观看历史短片；视频最后一帧就是当前判断时刻，再根据当前时刻 Top RGB 中的匿名编号作答。",
         )
 
     def load_sample(index: int, annotator_id: str):
@@ -214,6 +236,12 @@ def build_app(config_path: str, default_annotator_id: str = "") -> gr.Blocks:
                 f"错误：{exc}",
                 f"样本总数：**{len(samples)}**。",
             )
+        if _completed_sample_count(annotator_id) >= len(samples):
+            result = list(load_sample(len(samples) - 1, annotator_id))
+            result[10] = _completion_status()
+            result[11] = _progress(len(samples) - 1, annotator_id)
+            return tuple(result)
+
         index = choose_next_index(samples, config.dataset.annotation_dir, annotator_id, 0)
         return load_sample(index, annotator_id)
 
@@ -297,6 +325,14 @@ def build_app(config_path: str, default_annotator_id: str = "") -> gr.Blocks:
             "skip_reason": "",
         }
         append_annotation(config.dataset.annotation_dir, annotator_id, record)
+        if _completed_sample_count(annotator_id) >= len(samples):
+            result = list(load_sample(index, annotator_id))
+            result[10] = _completion_status(
+                f"已保存最后一条样本 `{sample['sample_id']}`。"
+            )
+            result[11] = _progress(index, annotator_id)
+            return tuple(result)
+
         next_index = choose_next_index(
             samples,
             config.dataset.annotation_dir,
@@ -329,6 +365,14 @@ def build_app(config_path: str, default_annotator_id: str = "") -> gr.Blocks:
                 "skip_reason": notes.strip() or "人工跳过",
             },
         )
+        if _completed_sample_count(annotator_id) >= len(samples):
+            result = list(load_sample(index, annotator_id))
+            result[10] = _completion_status(
+                f"最后一条样本 `{sample['sample_id']}` 已跳过。"
+            )
+            result[11] = _progress(index, annotator_id)
+            return tuple(result)
+
         next_index = choose_next_index(
             samples,
             config.dataset.annotation_dir,
@@ -348,7 +392,8 @@ def build_app(config_path: str, default_annotator_id: str = "") -> gr.Blocks:
     with gr.Blocks(title=config.app.title) as demo:
         gr.Markdown(
             "# 关键 Actor 人工盲评标注\n"
-            "请根据连续六视角画面和中心帧 Top RGB 独立判断。界面不会显示 LG 的选择结果。"
+            "视频只展示当前时刻之前约 4 秒的历史，最后一帧就是当前判断时刻，"
+            "不包含当前时刻之后的未来画面。界面不会显示 LG 的选择结果。"
         )
         with gr.Row():
             annotator_id = gr.Textbox(
@@ -362,12 +407,12 @@ def build_app(config_path: str, default_annotator_id: str = "") -> gr.Blocks:
         sample_meta = gr.Markdown()
 
         context_video = gr.Video(
-            label="连续六视角场景（约 4 秒：中心帧前约 2 秒 + 后约 2 秒）",
+            label="连续六视角历史场景（约 4 秒；最后一帧为当前判断时刻）",
             autoplay=False,
         )
         with gr.Row():
-            current_image = gr.Image(label="中心帧六视角", type="filepath")
-            top_image = gr.Image(label="中心帧 Top RGB（匿名候选编号）", type="filepath")
+            current_image = gr.Image(label="当前时刻六视角（视频最后一帧）", type="filepath")
+            top_image = gr.Image(label="当前时刻 Top RGB（匿名候选编号）", type="filepath")
 
         candidate_df = gr.Dataframe(
             headers=["编号", "类别", "前向 x/m", "右向 y/m", "距离/m", "速度/(m/s)"],
@@ -379,7 +424,8 @@ def build_app(config_path: str, default_annotator_id: str = "") -> gr.Blocks:
 
         gr.Markdown(
             "## 标注问题\n"
-            "> 请把自己视为当前自车驾驶员。选择接下来约 2 秒内你会**重点关注，"
+            "> **视频结束时刻就是当前判断时刻。** 请根据此前约 4 秒的场景变化，"
+            "选择从当前时刻开始的接下来约 2 秒内，你会**重点关注，"
             "并且可能影响你驾驶判断或操作**的交通参与者。可以选择一个或多个。\n\n"
             "> 仅仅出现在画面中、但不会影响你驾驶判断的对象不需要选择。"
             "红绿灯、道路结构和交通规则本身不属于 Actor。"
@@ -387,7 +433,7 @@ def build_app(config_path: str, default_annotator_id: str = "") -> gr.Blocks:
         selected_values = gr.CheckboxGroup(
             [],
             label=(
-                "1. 请选择重点关注的 Actor；若没有或无法判断，选择列表末尾的对应选项"
+                "1. 请选择当前时刻之后约 2 秒内需要重点关注的 Actor；若没有或无法判断，选择列表末尾的对应选项"
             ),
         )
         confidence = gr.Slider(

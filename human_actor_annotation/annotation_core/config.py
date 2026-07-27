@@ -33,9 +33,10 @@ class DatasetConfig:
 
 @dataclass
 class SamplingConfig:
-    # At 10 FPS, 20 history + current + 20 future frames span about 4 seconds.
-    history_frames: int = 20
-    future_frames: int = 20
+    # At 10 FPS, 40 history frames plus the current frame span about 4 seconds.
+    # No future frames are shown, so the video ends at the annotation time.
+    history_frames: int = 40
+    future_frames: int = 0
     sample_stride: int = 40
     max_samples: int = 1000
     random_seed: int = 20260726
