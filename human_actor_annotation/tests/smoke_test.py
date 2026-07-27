@@ -135,9 +135,59 @@ app:
         ],
         candidate_k=3,
     )
+    assert comparison["human_actor_consensus_samples"] == 1
+    assert comparison["available_prediction_records"] == 1
+    assert comparison["primary_actor_output_samples"] == 1
+    assert comparison["primary_actor_hits"] == 1
+    assert comparison["primary_actor_hit_rate"] == 1.0
     assert comparison["human_consensus_hit_rate"] == 1.0
     assert comparison["strict_top1_accuracy"] == 1.0
     assert comparison["candidate_recall_at_k"] == 1.0
+    assert comparison["disagreements"] == []
+    assert comparison["non_evaluable"] == []
+
+    # LG is allowed to output no final primary causal actor.  Such a sample is
+    # excluded from the primary-actor hit-rate denominator, while its candidate
+    # list can still contribute to Candidate Recall@K.
+    no_primary = compare_predictions(
+        consensus,
+        [
+            {
+                "sample_id": samples[0]["sample_id"],
+                "selected_actor_id": None,
+                "candidate_actor_ids": [actor_id],
+            }
+        ],
+        candidate_k=3,
+    )
+    assert no_primary["human_actor_consensus_samples"] == 1
+    assert no_primary["available_prediction_records"] == 1
+    assert no_primary["primary_actor_output_samples"] == 0
+    assert no_primary["primary_actor_hits"] == 0
+    assert no_primary["primary_actor_hit_rate"] != no_primary["primary_actor_hit_rate"]  # NaN
+    assert no_primary["no_primary_actor_predictions"] == 1
+    assert no_primary["candidate_recall_at_k"] == 1.0
+    assert no_primary["disagreements"] == []
+    assert len(no_primary["non_evaluable"]) == 1
+    assert no_primary["sample_results"][0]["primary_actor_hit"] is None
+    assert no_primary["sample_results"][0]["evaluation_status"] == "no_primary_actor_output"
+
+    wrong_primary = compare_predictions(
+        consensus,
+        [
+            {
+                "sample_id": samples[0]["sample_id"],
+                "selected_actor_id": "__OTHER_ACTOR__",
+                "candidate_actor_ids": [actor_id],
+            }
+        ],
+        candidate_k=3,
+    )
+    assert wrong_primary["primary_actor_output_samples"] == 1
+    assert wrong_primary["primary_actor_hits"] == 0
+    assert wrong_primary["primary_actor_hit_rate"] == 0.0
+    assert len(wrong_primary["disagreements"]) == 1
+    assert wrong_primary["non_evaluable"] == []
 
     # Building the Blocks tree catches most Gradio API incompatibilities without launching a server.
     from annotation_app import build_app

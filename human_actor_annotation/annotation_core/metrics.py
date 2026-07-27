@@ -423,6 +423,17 @@ def compare_predictions(
     prediction_records: Sequence[Dict[str, Any]],
     candidate_k: int = 3,
 ) -> Dict[str, Any]:
+    """Compare LG actor outputs with the human attention consensus set.
+
+    Human annotations describe a set of actors that drivers consider worth
+    attending to.  LG may legitimately produce no final primary causal actor
+    after its own counterfactual verification.  Therefore primary-actor hit
+    rate is conditional on LG actually outputting a primary actor: a null
+    primary actor is recorded as non-evaluable, not as an incorrect actor.
+
+    Candidate Recall@K remains independent of the final primary actor and can
+    still be computed whenever LG provides a ranked candidate list.
+    """
     if candidate_k <= 0:
         raise ValueError("candidate_k 必须大于 0")
 
@@ -432,16 +443,19 @@ def compare_predictions(
         if sample_id:
             predictions[sample_id] = record
 
-    hit_eligible = 0
-    hit_correct = 0
+    human_actor_consensus_samples = 0
+    available_prediction_records = 0
+    primary_actor_output_samples = 0
+    primary_actor_hits = 0
     strict_eligible = 0
     strict_correct = 0
     candidate_recall_eligible = 0
     candidate_recall_sum = 0.0
     missing_prediction_records = 0
-    missing_primary_actor = 0
+    no_primary_actor_predictions = 0
     sample_results: List[Dict[str, Any]] = []
     disagreements: List[Dict[str, Any]] = []
+    non_evaluable: List[Dict[str, Any]] = []
 
     for item in consensus:
         if item.get("consensus_status") != STATUS_ACTORS:
@@ -452,38 +466,46 @@ def compare_predictions(
         if not human_set or int(item.get("n_decisive_annotators", 0)) < 2:
             continue
 
+        human_actor_consensus_samples += 1
         sample_id = str(item["sample_id"])
-        hit_eligible += 1
         prediction = predictions.get(sample_id)
+        prediction_available = prediction is not None
         predicted_primary: Optional[str] = None
         candidate_ids: List[str] = []
         reason = ""
+        evaluation_status = ""
+
         if prediction is None:
             missing_prediction_records += 1
             reason = "missing_prediction_record"
+            evaluation_status = "missing_prediction_record"
         else:
+            available_prediction_records += 1
             predicted_primary = prediction_actor_id(prediction)
             candidate_ids = prediction_candidate_actor_ids(prediction)
             if predicted_primary is None:
-                missing_primary_actor += 1
-                reason = "missing_primary_actor"
+                # This is a valid LG outcome: no actor passed the method's final
+                # causal verification.  It is not counted as a primary-actor miss.
+                no_primary_actor_predictions += 1
+                reason = "no_primary_actor_output"
+                evaluation_status = "no_primary_actor_output"
 
-        primary_hit = bool(
-            predicted_primary is not None and predicted_primary in human_set
-        )
-        if primary_hit:
-            hit_correct += 1
-        elif not reason:
-            reason = "primary_actor_not_in_human_consensus_set"
+        primary_hit: Optional[bool] = None
+        if predicted_primary is not None:
+            primary_actor_output_samples += 1
+            primary_hit = predicted_primary in human_set
+            if primary_hit:
+                primary_actor_hits += 1
+                evaluation_status = "primary_actor_hit"
+            else:
+                reason = "primary_actor_not_in_human_consensus_set"
+                evaluation_status = "primary_actor_miss"
 
         human_primary = item.get("consensus_primary_actor_id")
         strict_match: Optional[bool] = None
-        if human_primary is not None:
+        if human_primary is not None and predicted_primary is not None:
             strict_eligible += 1
-            strict_match = bool(
-                predicted_primary is not None
-                and str(predicted_primary) == str(human_primary)
-            )
+            strict_match = str(predicted_primary) == str(human_primary)
             if strict_match:
                 strict_correct += 1
 
@@ -498,24 +520,48 @@ def compare_predictions(
             "sample_id": sample_id,
             "human_consensus_actor_ids": sorted(human_set),
             "human_primary_actor_id": human_primary,
+            "prediction_record_available": prediction_available,
             "predicted_primary_actor_id": predicted_primary,
+            "primary_actor_output": predicted_primary is not None,
             "primary_actor_hit": primary_hit,
             "strict_top1_match": strict_match,
             "candidate_k": candidate_k,
             "prediction_candidate_actor_ids": candidate_ids[:candidate_k],
             "candidate_recall_at_k": candidate_recall,
+            "evaluation_status": evaluation_status,
             "reason": reason,
         }
         sample_results.append(result)
-        if reason:
+        if evaluation_status == "primary_actor_miss":
             disagreements.append(result)
+        elif evaluation_status in {
+            "missing_prediction_record",
+            "no_primary_actor_output",
+        }:
+            non_evaluable.append(result)
+
+    primary_actor_hit_rate = (
+        primary_actor_hits / primary_actor_output_samples
+        if primary_actor_output_samples
+        else float("nan")
+    )
+    primary_actor_output_rate = (
+        primary_actor_output_samples / available_prediction_records
+        if available_prediction_records
+        else float("nan")
+    )
 
     return {
-        "eligible_human_actor_samples": hit_eligible,
-        "primary_actor_hits": hit_correct,
-        "human_consensus_hit_rate": (
-            hit_correct / hit_eligible if hit_eligible else float("nan")
-        ),
+        "human_actor_consensus_samples": human_actor_consensus_samples,
+        "available_prediction_records": available_prediction_records,
+        "primary_actor_output_samples": primary_actor_output_samples,
+        "primary_actor_output_rate": primary_actor_output_rate,
+        "primary_actor_hits": primary_actor_hits,
+        "primary_actor_hit_rate": primary_actor_hit_rate,
+        # Backward-compatible aliases.  The denominator is now only samples in
+        # which LG actually outputs a primary actor.
+        "eligible_human_actor_samples": primary_actor_output_samples,
+        "human_consensus_hit_rate": primary_actor_hit_rate,
         "strict_top1_eligible_samples": strict_eligible,
         "strict_top1_correct": strict_correct,
         "strict_top1_accuracy": (
@@ -529,9 +575,10 @@ def compare_predictions(
             else float("nan")
         ),
         "missing_prediction_records": missing_prediction_records,
-        "missing_primary_actor": missing_primary_actor,
+        "no_primary_actor_predictions": no_primary_actor_predictions,
         "sample_results": sample_results,
         "disagreements": disagreements,
+        "non_evaluable": non_evaluable,
     }
 
 

@@ -33,8 +33,8 @@ def main() -> None:
         "--predictions",
         default=None,
         help=(
-            "可选：LG 结果 JSON/JSONL。至少包含 sample_id 与最终主要 actor ID；"
-            "如包含候选 actor 列表，还会计算 Candidate Recall@K"
+            "可选：LG 结果 JSON/JSONL。至少包含 sample_id；LG 实际输出主要 actor 时"
+            "计算其是否落入人工共识集合，如包含候选 actor 列表还会计算 Candidate Recall@K"
         ),
     )
     parser.add_argument(
@@ -86,13 +86,20 @@ def main() -> None:
             prediction_records,
             candidate_k=args.candidate_k,
         )
+        sample_results = comparison.pop("sample_results")
+        disagreements = comparison.pop("disagreements")
+        non_evaluable = comparison.pop("non_evaluable")
         write_csv(
             output_dir / "prediction_comparison.csv",
-            comparison.pop("sample_results"),
+            sample_results,
         )
         write_csv(
             output_dir / "prediction_disagreements.csv",
-            comparison.pop("disagreements"),
+            disagreements,
+        )
+        write_csv(
+            output_dir / "prediction_non_evaluable.csv",
+            non_evaluable,
         )
 
     summary = {
