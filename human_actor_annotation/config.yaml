@@ -27,7 +27,7 @@ sampling:
 
   # 每隔 40 帧抽取一条，减少 4 秒片段之间的重复。
   sample_stride: 40
-  max_samples: 50
+  max_samples: 20
   random_seed: 20260726
 
   require_all_six_views: true

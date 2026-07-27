@@ -14,12 +14,13 @@
 - 生成约 4 秒的“历史帧 + 当前帧 + 未来帧”六视角同步短片；
 - 根据 `measurements` 中的自车速度优先保留行驶片段；
 - 在中心帧 `top_rgb` 上绘制匿名 actor 编号，采用锚点、引导线和自动避让布局；
-- 支持单一关键对象、多个共同对象、无关键对象、无法判断；
+- 测试人员直接选择一个或多个重点关注 actor，也可选择“无关注对象”或“无法判断”；
 - 支持多人通过浏览器独立标注；
 - 自动断点续标，允许回看和修订；
 - 每名标注员分别保存 JSONL 和 CSV；
-- 统计人工一致率、Fleiss' Kappa、共识结果；
-- 可选地将人工共识与 LG actor 预测进行 Top-1 比较；
+- 统计集合完全一致率、平均 Jaccard、集合 F1 和二元 Krippendorff alpha；
+- 构造多人共识 actor 集合，并与 LG 最终主要 actor 计算 Hit Rate 和 Strict Top-1；
+- LG 提供分析候选列表时，额外计算 Candidate Recall@K；
 - 支持按指定冗余度将样本均衡分配给多名测试人员。
 
 ## 2. 目录结构
@@ -124,7 +125,7 @@ python prepare_samples.py --config config.yaml
 ```yaml
 sampling:
   sample_stride: 40
-  max_samples: 50
+  max_samples: 1000
 ```
 
 `max_samples` 是最终样本数量上限，`sample_stride` 是中心帧抽样间隔。实际数量还会受到 4 秒完整窗口、六视角完整性、boxes、候选数量和行驶状态筛选等条件影响。
@@ -180,25 +181,32 @@ http://运行程序的电脑IP:7860
 
 ## 8. 界面中的问题
 
-测试人员依次完成：
+测试人员只需要完成两个核心问题：
 
-1. 判断“自车接下来约 2 秒的安全动作是否受到交通参与者直接约束”；
-2. 若存在约束，判断是一个主要对象还是多个对象共同作用，并勾选匿名 actor 编号；
-3. 假设所选对象不存在，自车动作是否改变；
-4. 该对象主要导致减速、停车、左右避让、低速观察等哪种动作；
-5. 给出 1～5 级置信度；
-6. 可选备注。
+1. 从匿名编号中选择自己作为驾驶员在接下来约 2 秒内会重点关注，并且可能影响驾驶判断或操作的交通参与者；
+2. 给出 1～5 级判断置信度。
 
-界面给出的关键对象定义是：假设某个交通参与者不存在，如果自车接下来约 2 秒内的减速、停车、避让或保持车距等安全动作会明显变化，则该对象属于关键对象。红绿灯、道路结构和交通规则本身不属于 Actor。
+第一个问题允许：
+
+- 选择一个 actor；
+- 选择多个 actor；
+- 选择“没有需要重点关注的对象”；
+- 选择“画面信息不足，无法判断”。
+
+“无关注对象”和“无法判断”位于同一个选择列表末尾，选择其中任意一个时不能再同时选择 actor 编号。
+
+这里的标注目标是获得**人工驾驶关注对象集合**，用于验证 LG 最终选择的主要 actor 是否落入人工共识集合。界面不再询问“移除对象后动作是否变化”或“对象导致什么驾驶动作”，避免把对象选择、因果验证和动作解释混在同一问卷中。
+
+仅仅出现在画面中、但不会影响驾驶判断的对象不需要选择。红绿灯、道路结构和交通规则本身不属于 Actor。
 
 Top RGB 中：小锚点表示 actor 的真实投影位置，圆形编号通过引导线与锚点相连；多个编号会自动避让，边缘对象的编号会被约束在图像内部。
 
 界面不会展示：
 
-- LG 选择的 actor；
+- LG 最终选择的主要 actor；
+- LG 进入反事实分析的候选排序；
 - `causal_score`；
-- LG 问答；
-- 关键 actor 的候选排序分数。
+- LG 问答或轨迹结果。
 
 ## 9. 标注结果
 
@@ -210,18 +218,19 @@ annotation_workspace/annotations/
 └── annotations_P02.csv
 ```
 
-JSONL 中同时保存：
+JSONL 中保存：
 
+- `attention_status`：`actors`、`none`、`uncertain` 或 `skip`；
 - 匿名编号，如 `A2`；
-- 真实 actor ID，如 `2145`；
-- actor 类别；
-- 场景判断；
-- 动作影响；
-- 置信度；
+- 对应的真实 actor ID 和 actor 类别；
+- 判断置信度；
+- 可选备注；
 - 单条耗时；
 - 修订版本号。
 
 同一测试人员重新提交同一样本时不会覆盖历史记录，而是追加一个新修订；统计时只使用最新修订。
+
+当前正式字段与早期试标字段不同。开始正式实验前，建议删除旧的测试标注目录，或在 `config.yaml` 中使用新的 `work_dir`，不要把早期试标记录和正式结果混合。
 
 ## 10. 多人样本分配
 
@@ -261,6 +270,14 @@ dataset:
 python evaluate_annotations.py --config config.yaml
 ```
 
+默认采用严格多数规则：某个 actor 的投票比例必须 **大于 0.5**，才进入人工共识集合。阈值可修改：
+
+```bash
+python evaluate_annotations.py \
+  --config config.yaml \
+  --consensus-threshold 0.5
+```
+
 输出：
 
 ```text
@@ -269,48 +286,84 @@ annotation_workspace/evaluation/
 └── consensus.csv
 ```
 
-`summary.json` 包含：
+`summary.json` 中的人工一致性指标包括：
 
-- pairwise exact agreement；
-- dominant actor agreement；
-- Fleiss' Kappa；
-- 标注员数量；
-- 需要专家复核的歧义样本数量。
+- `pairwise_status_agreement`：两名测试人员对“有 actor / 无 actor / 无法判断”的状态一致率；
+- `pairwise_exact_set_agreement`：两人选择的 actor 集合完全相同的比例；
+- `pairwise_mean_jaccard`：两人 actor 集合的平均 Jaccard 相似度；
+- `pairwise_mean_set_f1`：两人 actor 集合的平均集合 F1；
+- `krippendorff_alpha_binary`：把每个“样本—候选 actor”视为选中/未选中的二元标注单元后计算的一致性。
 
-`consensus.csv` 给出每条样本的多数共识 actor 和投票比例。
+`consensus.csv` 给出：
+
+- 人工共识 actor 集合 `consensus_actor_ids`；
+- 唯一人工主要 actor `consensus_primary_actor_id`（最高票唯一且超过阈值时才存在）；
+- 各 actor 的票数和投票比例；
+- 无关注对象和无法判断的票数；
+- 是否需要专家复核。
 
 ## 12. 与 LG 结果比较
 
-准备一个 JSONL：
+LG 结果至少需要给出每条样本最终确定的主要 actor：
 
 ```json
 {"sample_id": "Town12__route_x__0045", "selected_actor_id": "2145"}
 ```
 
-然后运行：
+为了同时评价 LG 前三名分析候选的召回能力，可以额外提供按分析顺序排列的候选 ID：
+
+```json
+{
+  "sample_id": "Town12__route_x__0045",
+  "selected_actor_id": "2145",
+  "candidate_actor_ids": ["2145", "2190", "2031"]
+}
+```
+
+运行：
 
 ```bash
 python evaluate_annotations.py \
   --config config.yaml \
-  --predictions lg_predictions.jsonl
+  --predictions lg_predictions.jsonl \
+  --candidate-k 3
 ```
 
-程序也兼容以下常见字段：
+最终主要 actor 字段兼容：
 
 ```text
+selected_actor_id
 critical_actor_id
 causal_actor_id
+primary_actor_id
 causal_object.id
 critical_actor.id
 result.causal_object.id
 ```
 
-输出会增加：
+候选列表字段兼容：
 
-- 人工共识可评样本数；
-- LG Top-1 actor accuracy；
-- 缺失预测数；
-- `prediction_disagreements.csv`。
+```text
+candidate_actor_ids
+top_candidate_actor_ids
+analysis_candidate_actor_ids
+topk_actor_ids
+ranked_actor_ids
+candidates
+candidate_actors
+ranked_candidates
+```
+
+评价结果包括：
+
+- **Human-consensus Hit Rate**：LG 最终主要 actor 是否落入人工共识 actor 集合；
+- **Strict Top-1 Accuracy**：人工存在唯一主要 actor 时，LG 是否与其完全一致；
+- **Candidate Recall@K**：人工共识 actor 中有多少进入 LG 前 K 名分析候选；
+- 缺失 LG 结果或缺失主要 actor 的样本数；
+- `prediction_comparison.csv`：所有可评价样本的逐条结果；
+- `prediction_disagreements.csv`：LG 主要 actor 未命中人工共识集合的样本。
+
+需要明确区分：Hit Rate 和 Strict Top-1 验证 LG **最终主要 actor 选择**；Candidate Recall@K 验证 LG **前置候选生成/筛选**。二者不能作为同一个指标解释。
 
 ## 13. Top RGB 编号位置校准
 
@@ -350,11 +403,11 @@ render:
 第一轮建议：
 
 - 先抽取 50～100 条进行界面和标注规范试运行；
-- 由 3 名研究人员独立标注；
+- 每条样本至少由 3 名研究人员独立标注；条件允许时建议使用 5 名；
 - 根据争议样本完善说明，但不要向测试人员展示 LG 结果；
 - 正式阶段抽取 600～1000 条；
 - 保证每条至少 3 人标注；
-- 对无多数共识、低置信度和多因果场景单独专家复核；
+- 对无多数共识、低置信度或人工主要 actor 并列的样本单独专家复核；
 - 论文同时报告人工一致性和 LG—人工一致性。
 
 ## 15. 自检

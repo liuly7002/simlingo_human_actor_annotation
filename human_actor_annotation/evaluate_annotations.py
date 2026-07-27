@@ -5,10 +5,11 @@ import json
 from pathlib import Path
 
 from annotation_core.config import load_config
+from annotation_core.dataset import load_jsonl
 from annotation_core.metrics import (
     build_consensus,
     compare_predictions,
-    fleiss_kappa,
+    krippendorff_alpha_binary,
     pairwise_agreement,
     read_annotation_dir,
     read_json_or_jsonl,
@@ -26,12 +27,27 @@ def json_number(value):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="汇总人工标注一致性并与 LG 预测比较")
+    parser = argparse.ArgumentParser(description="汇总人工关注对象标注并与 LG 结果比较")
     parser.add_argument("--config", required=True)
     parser.add_argument(
         "--predictions",
         default=None,
-        help="可选：方法预测 JSON/JSONL，至少包含 sample_id 与 selected_actor_id",
+        help=(
+            "可选：LG 结果 JSON/JSONL。至少包含 sample_id 与最终主要 actor ID；"
+            "如包含候选 actor 列表，还会计算 Candidate Recall@K"
+        ),
+    )
+    parser.add_argument(
+        "--consensus-threshold",
+        type=float,
+        default=0.5,
+        help="人工 actor 进入共识集合所需的严格投票比例阈值，默认 > 0.5",
+    )
+    parser.add_argument(
+        "--candidate-k",
+        type=int,
+        default=3,
+        help="评价 LG 分析候选召回率时使用的 K，默认 3",
     )
     parser.add_argument("--output-dir", default=None)
     args = parser.parse_args()
@@ -45,24 +61,53 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     records = read_annotation_dir(config.dataset.annotation_dir)
-    consensus = build_consensus(records)
+    manifest_samples = load_jsonl(config.dataset.manifest_path)
+    consensus = build_consensus(records, threshold=args.consensus_threshold)
     agreement = pairwise_agreement(records)
-    agreement["fleiss_kappa"] = fleiss_kappa(records)
+    agreement["krippendorff_alpha_binary"] = krippendorff_alpha_binary(
+        records, manifest_samples
+    )
     agreement["annotation_records"] = len(records)
-    agreement["unique_samples"] = len({str(r.get('sample_id', '')) for r in records})
-    agreement["annotators"] = sorted({str(r.get('annotator_id', '')) for r in records})
+    agreement["unique_samples"] = len(
+        {str(record.get("sample_id", "")) for record in records}
+    )
+    agreement["annotators"] = sorted(
+        {str(record.get("annotator_id", "")) for record in records}
+    )
 
     write_csv(output_dir / "consensus.csv", consensus)
     comparison = None
     if args.predictions:
-        prediction_records = read_json_or_jsonl(Path(args.predictions).expanduser().resolve())
-        comparison = compare_predictions(consensus, prediction_records)
-        write_csv(output_dir / "prediction_disagreements.csv", comparison.pop("disagreements"))
+        prediction_records = read_json_or_jsonl(
+            Path(args.predictions).expanduser().resolve()
+        )
+        comparison = compare_predictions(
+            consensus,
+            prediction_records,
+            candidate_k=args.candidate_k,
+        )
+        write_csv(
+            output_dir / "prediction_comparison.csv",
+            comparison.pop("sample_results"),
+        )
+        write_csv(
+            output_dir / "prediction_disagreements.csv",
+            comparison.pop("disagreements"),
+        )
 
     summary = {
         "agreement": {key: json_number(value) for key, value in agreement.items()},
+        "consensus_threshold": args.consensus_threshold,
         "consensus_samples": len(consensus),
-        "needs_adjudication": sum(bool(item.get("needs_adjudication")) for item in consensus),
+        "actor_consensus_samples": sum(
+            item.get("consensus_status") == "actors" for item in consensus
+        ),
+        "no_attention_consensus_samples": sum(
+            item.get("consensus_status") == "none" for item in consensus
+        ),
+        "needs_adjudication": sum(
+            bool(item.get("needs_adjudication")) for item in consensus
+        ),
         "prediction_comparison": (
             {key: json_number(value) for key, value in comparison.items()}
             if comparison is not None

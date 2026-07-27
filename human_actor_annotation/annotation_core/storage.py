@@ -3,25 +3,23 @@ from __future__ import annotations
 import csv
 import fcntl
 import json
-import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, Set
 
 
+ANNOTATION_SCHEMA_VERSION = 1
 ANNOTATION_FIELDS = [
     "schema_version",
     "annotator_id",
     "sample_id",
     "route_name",
     "center_stem",
-    "scene_judgement",
+    "attention_status",
     "selected_display_labels",
     "selected_actor_ids",
     "selected_actor_classes",
-    "removal_changes_action",
-    "action_effect",
     "confidence",
     "notes",
     "annotation_time_s",
@@ -85,6 +83,24 @@ def completed_sample_ids(annotation_dir: Path, annotator_id: str) -> Set[str]:
     return set(load_latest_annotations(annotation_dir, annotator_id).keys())
 
 
+def _prepare_csv_path(path: Path) -> None:
+    """Avoid appending the new compact schema below an incompatible old header."""
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    try:
+        with path.open("r", encoding="utf-8", newline="") as f:
+            header = next(csv.reader(f), [])
+    except Exception:
+        header = []
+    if header == ANNOTATION_FIELDS:
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = path.with_name(f"{path.stem}_legacy_{timestamp}{path.suffix}")
+    path.replace(backup)
+    print(f"[Storage] 检测到旧 CSV 字段，已备份为：{backup}")
+
+
 def append_annotation(annotation_dir: Path, annotator_id: str, record: Dict) -> Dict:
     paths = annotation_paths(annotation_dir, annotator_id)
     latest = load_latest_annotations(annotation_dir, annotator_id)
@@ -92,7 +108,7 @@ def append_annotation(annotation_dir: Path, annotator_id: str, record: Dict) -> 
     revision = int(previous.get("revision", 0)) + 1 if previous else 1
 
     completed = dict(record)
-    completed.setdefault("schema_version", 1)
+    completed.setdefault("schema_version", ANNOTATION_SCHEMA_VERSION)
     completed["annotator_id"] = sanitize_annotator_id(annotator_id)
     completed["created_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
     completed["revision"] = revision
@@ -100,6 +116,7 @@ def append_annotation(annotation_dir: Path, annotator_id: str, record: Dict) -> 
     with _locked_file(paths["jsonl"], "a") as f:
         f.write(json.dumps(completed, ensure_ascii=False) + "\n")
 
+    _prepare_csv_path(paths["csv"])
     csv_exists = paths["csv"].exists() and paths["csv"].stat().st_size > 0
     csv_record = dict(completed)
     for key in ["selected_display_labels", "selected_actor_ids", "selected_actor_classes"]:
@@ -116,7 +133,7 @@ def append_annotation(annotation_dir: Path, annotator_id: str, record: Dict) -> 
 
 
 def choose_next_index(
-    samples: List[Dict],
+    samples: list,
     annotation_dir: Path,
     annotator_id: str,
     start_index: int = 0,

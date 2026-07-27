@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 DEMO_ROOT = ROOT / "demo_dataset"
+DEMO_WORKSPACE = ROOT / "demo_workspace"
 CONFIG = ROOT / "config.demo.yaml"
 
 
@@ -17,13 +19,17 @@ def run(*args: str) -> None:
 
 
 def main() -> None:
+    shutil.rmtree(DEMO_ROOT, ignore_errors=True)
+    shutil.rmtree(DEMO_WORKSPACE, ignore_errors=True)
+    CONFIG.unlink(missing_ok=True)
+
     run("tests/make_demo_dataset.py", "--output", str(DEMO_ROOT / "data/Town12/demo_route"))
     CONFIG.write_text(
         f"""dataset:
   dataset_root: {DEMO_ROOT / 'data'}
-  work_dir: {ROOT / 'demo_workspace'}
-  manifest_path: {ROOT / 'demo_workspace/manifest.jsonl'}
-  annotation_dir: {ROOT / 'demo_workspace/annotations'}
+  work_dir: {DEMO_WORKSPACE}
+  manifest_path: {DEMO_WORKSPACE / 'manifest.jsonl'}
+  annotation_dir: {DEMO_WORKSPACE / 'annotations'}
 sampling:
   history_frames: 20
   future_frames: 20
@@ -50,9 +56,14 @@ app:
 
     from annotation_core.config import load_config
     from annotation_core.dataset import load_jsonl
+    from annotation_core.metrics import (
+        build_consensus,
+        compare_predictions,
+        krippendorff_alpha_binary,
+        pairwise_agreement,
+    )
     from annotation_core.render import render_sample_assets
     from annotation_core.storage import append_annotation
-    from annotation_core.metrics import build_consensus, pairwise_agreement, fleiss_kappa
 
     cfg = load_config(CONFIG)
     samples = load_jsonl(cfg.dataset.manifest_path)
@@ -84,12 +95,10 @@ app:
         "sample_id": samples[0]["sample_id"],
         "route_name": samples[0]["route_name"],
         "center_stem": samples[0]["center_stem"],
-        "scene_judgement": "存在一个主要对象",
+        "attention_status": "actors",
         "selected_display_labels": [candidate["display_label"]],
         "selected_actor_ids": [candidate["actor_id"]],
         "selected_actor_classes": [candidate["class"]],
-        "removal_changes_action": "会明显改变",
-        "action_effect": "减速",
         "confidence": 4,
         "notes": "",
         "annotation_time_s": 3.2,
@@ -98,10 +107,32 @@ app:
     }
     r1 = append_annotation(cfg.dataset.annotation_dir, "P01", base)
     r2 = append_annotation(cfg.dataset.annotation_dir, "P02", base)
+
     consensus = build_consensus([r1, r2])
-    assert consensus[0]["consensus_actor_id"] == str(candidate["actor_id"])
-    assert pairwise_agreement([r1, r2])["pairwise_exact_agreement"] == 1.0
-    assert fleiss_kappa([r1, r2]) != float("inf")
+    actor_id = str(candidate["actor_id"])
+    assert consensus[0]["consensus_actor_ids"] == [actor_id]
+    assert consensus[0]["consensus_primary_actor_id"] == actor_id
+
+    agreement = pairwise_agreement([r1, r2])
+    assert agreement["pairwise_exact_set_agreement"] == 1.0
+    assert agreement["pairwise_mean_jaccard"] == 1.0
+    alpha = krippendorff_alpha_binary([r1, r2], samples)
+    assert alpha != float("inf")
+
+    comparison = compare_predictions(
+        consensus,
+        [
+            {
+                "sample_id": samples[0]["sample_id"],
+                "selected_actor_id": actor_id,
+                "candidate_actor_ids": [actor_id],
+            }
+        ],
+        candidate_k=3,
+    )
+    assert comparison["human_consensus_hit_rate"] == 1.0
+    assert comparison["strict_top1_accuracy"] == 1.0
+    assert comparison["candidate_recall_at_k"] == 1.0
 
     # Building the Blocks tree catches most Gradio API incompatibilities without launching a server.
     from annotation_app import build_app
