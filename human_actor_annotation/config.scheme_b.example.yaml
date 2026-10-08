@@ -1,0 +1,41 @@
+#方案B配置。复制为 config.scheme_b.yaml 后检查数据根路径。
+dataset:
+  dataset_root: /root/autodl-tmp/database/simlingo_v2_2026_09_12_22_24_28/data/simlingo
+  work_dir: ./annotation_workspace_scheme_b
+  manifest_path: ./annotation_workspace_scheme_b/manifest.jsonl
+  annotation_dir: ./annotation_workspace_scheme_b/annotations
+sampling:
+  history_frames: 40
+  future_frames: 0
+  random_seed: 20261008
+  require_all_six_views: true
+  require_top_rgb: true
+  require_boxes: true
+  # Fixed independent candidate rule for both LG and CVAA.
+  max_candidates: 80
+  skip_if_candidates_truncated: true
+  include_empty_candidate_samples: true
+  max_actor_distance_m: 120.0
+  min_actor_forward_m: -40.0
+  include_classes: [vehicle, car, truck, bus, motorcycle, bicycle, cyclist, pedestrian, walker, static, obstacle, traffic_cone, cone, barrier, warning]
+  exclude_classes: [ego, ego_vehicle, ego_car, hero]
+render:
+  fps: 10
+  mosaic_width: 1280
+  current_mosaic_width: 1280
+  top_preview_width: 720
+  marker_radius_px: 18
+  marker_anchor_radius_px: 5
+  marker_label_gap_px: 10
+  top_meters_per_pixel: null
+  top_ego_center_x_ratio: 0.5
+  top_ego_center_y_ratio: 0.62
+  forward_is_up: true
+  right_is_right: true
+app:
+  host: 127.0.0.1
+  port: 7860
+  share: false
+  show_candidate_table: true
+  allow_notes: true
+  title: 关键 Actor 人工盲评 - Scheme B
