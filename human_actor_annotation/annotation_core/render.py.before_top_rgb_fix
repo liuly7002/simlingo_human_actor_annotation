@@ -267,7 +267,6 @@ def _layout_candidate_labels(
 
 
 def annotate_top_rgb(sample: Dict, config: ProjectConfig) -> np.ndarray:
-    """#修改20260720：编号中心即 actor 俯视投影中心，不再通过避让算法移动编号。"""
     dataset_root = config.dataset.dataset_root
     center_offset = int(sample["center_frame_offset"])
     frame = sample["frames"][center_offset]
@@ -275,62 +274,88 @@ def annotate_top_rgb(sample: Dict, config: ProjectConfig) -> np.ndarray:
     top = _read_image(top_path)
     if top is None:
         top = np.zeros((720, 720, 3), dtype=np.uint8)
-        cv2.putText(top, "TOP_RGB MISSING", (50, 360),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (235, 235, 235), 2, cv2.LINE_AA)
+        cv2.putText(
+            top,
+            "TOP_RGB MISSING",
+            (80, top.shape[0] // 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (230, 230, 230),
+            2,
+            cv2.LINE_AA,
+        )
 
     route_dir = resolve_manifest_path(sample.get("route_dir"), dataset_root)
     route_dir = route_dir if route_dir is not None else dataset_root
     mpp = _derive_meters_per_pixel(top, route_dir, config)
-    height, width = top.shape[:2]
-    cx = float(config.render.top_ego_center_x_ratio) * width
-    cy = float(config.render.top_ego_center_y_ratio) * height
-    right_sign = 1.0 if config.render.right_is_right else -1.0
-    forward_sign = -1.0 if config.render.forward_is_up else 1.0
 
-    # 可追溯的物理投影：车辆记录中的 x_m/y_m 均为 ego-relative 坐标。
-    # 其正方向来自数据采集端：x 向前、y 向右；Top RGB 镜头竖直朝下。
-    in_view = []
-    outside_count = 0
-    for actor in sample.get("candidates", []):
-        x = actor.get("x_m")
-        y = actor.get("y_m")
-        if x is None or y is None:
-            outside_count += 1
-            continue
-        u = cx + right_sign * float(y) / mpp
-        v = cy + forward_sign * float(x) / mpp
-        if 0 <= u < width and 0 <= v < height:
-            in_view.append((actor, int(round(u)), int(round(v))))
+    marker_color = (30, 215, 255)
+    text_color = (20, 20, 20)
+    leader_color = (240, 240, 240)
+    anchor_color = (20, 20, 20)
+    anchor_radius = max(3, int(config.render.marker_anchor_radius_px))
+    placements = _layout_candidate_labels(
+        sample, top.shape[1], top.shape[0], mpp, config
+    )
+
+    # Draw leader lines first so bubbles and anchors remain clean.
+    for item in placements:
+        cv2.line(
+            top,
+            item["anchor"],
+            item["label_center"],
+            leader_color,
+            thickness=2,
+            lineType=cv2.LINE_AA,
+        )
+
+    for item in placements:
+        anchor = item["anchor"]
+        label_center = item["label_center"]
+        radius = int(item["radius"])
+        actor = item["actor"]
+        label = str(actor.get("display_label", "A?"))
+
+        if item["clipped"]:
+            cv2.drawMarker(
+                top,
+                anchor,
+                marker_color,
+                markerType=cv2.MARKER_DIAMOND,
+                markerSize=anchor_radius * 3,
+                thickness=2,
+                line_type=cv2.LINE_AA,
+            )
         else:
-            outside_count += 1
+            cv2.circle(top, anchor, anchor_radius + 2, (245, 245, 245), -1, cv2.LINE_AA)
+            cv2.circle(top, anchor, anchor_radius, anchor_color, -1, cv2.LINE_AA)
 
-    # 只在真实的投影像素上绘制，不再将视野外对象钉在边缘伪装为可见目标。
-    # 标签和 actor 中心重合，可以直接用俯视相机图像校验。
-    for actor, u, v in in_view:
-        label = str(actor.get("display_label", "?"))
-        radius = max(13, min(18, int(config.render.marker_radius_px)))
-        cv2.circle(top, (u, v), radius + 2, (0, 0, 0), -1, cv2.LINE_AA)
-        cv2.circle(top, (u, v), radius, (0, 230, 255), -1, cv2.LINE_AA)
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.47, 2)
-        cv2.putText(top, label, (u - tw // 2, v + th // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.47, (0, 0, 0), 2, cv2.LINE_AA)
+        cv2.circle(top, label_center, radius, marker_color, thickness=-1, lineType=cv2.LINE_AA)
+        cv2.circle(top, label_center, radius, (10, 10, 10), thickness=2, lineType=cv2.LINE_AA)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.62, 2)
+        cv2.putText(
+            top,
+            label,
+            (label_center[0] - tw // 2, label_center[1] + th // 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            text_color,
+            2,
+            cv2.LINE_AA,
+        )
 
-    # 相机横向/纵向相对自车均为 0，默认标定下 ego 位于 50%/50%。
-    ego_u, ego_v = int(round(cx)), int(round(cy))
-    cv2.circle(top, (ego_u, ego_v), 11, (0, 0, 0), 3, cv2.LINE_AA)
-    cv2.drawMarker(top, (ego_u, ego_v), (255, 255, 255),
-                   markerType=cv2.MARKER_CROSS, markerSize=15,
-                   thickness=2, line_type=cv2.LINE_AA)
-    cv2.putText(top, "EGO", (max(2, ego_u - 17), max(13, ego_v - 17)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 255), 2, cv2.LINE_AA)
-
-    legend = f"EGO=camera center | {mpp:.3f} m/px | outside top view: {outside_count}"
-    cv2.rectangle(top, (0, 0), (width, 30), (12, 12, 12), -1)
-    cv2.putText(top, legend, (8, 20), cv2.FONT_HERSHEY_SIMPLEX,
-                0.40, (255, 255, 255), 1, cv2.LINE_AA)
-    if outside_count:
-        cv2.putText(top, "Other IDs may be outside top camera FOV", (8, height - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1, cv2.LINE_AA)
+    # Mark ego position without adding an actor candidate.
+    ego_u = int(round(config.render.top_ego_center_x_ratio * top.shape[1]))
+    ego_v = int(round(config.render.top_ego_center_y_ratio * top.shape[0]))
+    cv2.drawMarker(
+        top,
+        (ego_u, ego_v),
+        (255, 255, 255),
+        markerType=cv2.MARKER_TRIANGLE_UP,
+        markerSize=24,
+        thickness=2,
+        line_type=cv2.LINE_AA,
+    )
 
     target_w = int(config.render.top_preview_width)
     if target_w > 0 and top.shape[1] != target_w:
@@ -459,7 +484,7 @@ def _write_browser_video(
 
 def _render_signature(sample: Dict, config: ProjectConfig) -> str:
     payload = {
-        "version": 4,
+        "version": 3,
         "sample_id": sample.get("sample_id"),
         "center": sample.get("center_stem"),
         "frames": [frame.get("stem") for frame in sample.get("frames", [])],
@@ -481,10 +506,6 @@ def _render_signature(sample: Dict, config: ProjectConfig) -> str:
             "marker_anchor_radius_px": config.render.marker_anchor_radius_px,
             "marker_label_gap_px": config.render.marker_label_gap_px,
             "top_meters_per_pixel": config.render.top_meters_per_pixel,
-            "top_ego_center_x_ratio": config.render.top_ego_center_x_ratio,
-            "top_ego_center_y_ratio": config.render.top_ego_center_y_ratio,
-            "forward_is_up": config.render.forward_is_up,
-            "right_is_right": config.render.right_is_right,
         },
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")

@@ -62,7 +62,7 @@ metric.krippendorff_alpha_binary = lambda records, samples: 1.0
 sys.modules['annotation_core.metrics'] = metric
 
 from scheme_b_common import parse_keyframes, load_lg, load_cvaa, jsonl, write_jsonl
-from prepare_scheme_b import make_scheme_b
+from prepare_scheme_b import make_scheme_b, recover_lg_id, history_stratum, sample_matched_negatives
 from evaluate_scheme_b import evaluate
 
 
@@ -73,7 +73,7 @@ def test_scheme_b():
         for r in ('route001', 'route002'):
             (root / r).mkdir(parents=True)
         keys = tmp / 'keyframes.txt'
-        lines = ['route001/0010', 'route001/0012', 'route002/0020', 'route002/0022']
+        lines = ['route001/0010', 'route001/0012', 'route002/0014', 'route002/0016']
         keys.write_text('\n'.join(lines) + '\n')
         assert len(parse_keyframes(keys)) == 4
         lgfile, cfile = tmp / 'lg.jsonl', tmp / 'cvaa.jsonl'
@@ -84,6 +84,47 @@ def test_scheme_b():
         write_jsonl(cfile, [{'route_id': s.split('/')[0], 'frame': s.split('/')[1],
                              'top_actor_id': '22', 'num_actors': 2}
                             for s in lines])
+        # Actual LG full-output schema uses lg_result.causal_analysis.*.
+        full_lg = tmp / 'all_frame_results_full.jsonl'
+        write_jsonl(full_lg, [
+            {'route_rel': line.split('/')[0], 'frame': line.split('/')[1],
+             'lg_result': {'causal_analysis': {
+                 'has_causal_object': i < 2,
+                 'causal_object': {'id': '11' if i == 0 else '22'} if i < 2 else None}}}
+            for i, line in enumerate(lines)
+        ])
+        parsed_full = load_lg(full_lg, parse_keyframes(keys))
+        assert sum(v['has_causal_object'] for v in parsed_full.values()) == 2
+        assert parsed_full[('route001', '0010')]['selected_actor_id'] == '11'
+        assert parsed_full[('route002', '0014')]['selected_actor_id'] is None
+        # A real LG causal actor may be accepted despite missing CARLA actor ID.
+        # The LG planning code falls back to the actor's class/ego-relative xy.
+        no_id_lg = tmp / 'lg_null_actor_id.jsonl'
+        missing_records = []
+        for i, line in enumerate(lines):
+            route, frame = line.split('/')
+            causal = {'has_causal_object': i < 2,
+                      'causal_object': ({'id': None if i == 0 else '22',
+                                         'class': 'vehicle', 'x_m': 6 if i == 0 else 9,
+                                         'y_m': 0 if i == 0 else 1}
+                                        if i < 2 else {'exists': False})}
+            missing_records.append({'route_rel': route, 'frame': frame,
+                                    'lg_result': {'causal_analysis': causal}})
+        write_jsonl(no_id_lg, missing_records)
+        parsed_missing = load_lg(no_id_lg, parse_keyframes(keys))
+        assert sum(v['has_causal_object'] for v in parsed_missing.values()) == 2
+        one = parsed_missing[('route001', '0010')]
+        assert one['actor_id_missing'] and one['selected_actor_id'] is None
+        match, reason = recover_lg_id(one, actors.load_normalized_actors(None))
+        assert (match, reason) == ('11', 'unique_class_pose_match'), (match, reason)
+        no_pose = dict(one, actor_signature={'class': 'vehicle', 'x_m': 100, 'y_m': 100})
+        assert recover_lg_id(no_pose, actors.load_normalized_actors(None))[0] is None
+        # The user's mistaken cvaa argument is an LG full output; fail clearly.
+        try:
+            load_cvaa(full_lg, parse_keyframes(keys))
+            raise AssertionError('LG full output mistaken for CVAA unexpectedly parsed')
+        except ValueError as exc:
+            assert 'Wrong --cvaa-rankings input' in str(exc), exc
         work = tmp / 'work'
         work.mkdir()
         fakecfg = SimpleNamespace(
@@ -96,6 +137,21 @@ def test_scheme_b():
                                      max_candidates=80, random_seed=1,
                                      skip_if_candidates_truncated=True,
                                      include_empty_candidate_samples=True))
+        # End-to-end missing-ID recovery must preserve LG true-positive status.
+        alternate_work = tmp / 'missing_id_work'
+        alternate_work.mkdir()
+        alternate_cfg = SimpleNamespace(dataset=SimpleNamespace(
+            dataset_root=root, work_dir=alternate_work,
+            manifest_path=alternate_work / 'manifest.jsonl',
+            annotation_dir=alternate_work / 'annotations'), sampling=fakecfg.sampling)
+        recovered_summary = make_scheme_b(alternate_cfg, keys, no_id_lg, cfile, target=2, seed=1234)
+        assert recovered_summary['lg_confirmed_missing_id_in_source'] == 1
+        assert recovered_summary['lg_recovered_actor_id_in_samples'] == 1
+        assert recovered_summary['lg_positive_unresolvable_in_samples'] == 0
+        recovered_rows = list(jsonl(alternate_work / 'evaluation/scheme_b_predictions.jsonl'))
+        row = next(r for r in recovered_rows if r['frame'] == '0010')
+        assert row['lg_has_causal_object'] is True and row['lg_selected_actor_id'] == '11'
+        assert row['lg_available'] is True and row['lg_actor_id_missing_in_source'] is True
         summary = make_scheme_b(fakecfg, keys, lgfile, cfile, target=2, seed=1234)
         assert summary['selected_lg_positive'] == 2 and summary['selected_lg_negative'] == 2
         assert summary['actor_mapping_mismatches'] == 0
@@ -103,7 +159,7 @@ def test_scheme_b():
         assert all(len(x['frames']) == 41 and x['center_frame_offset'] == 40 for x in samples)
         assert any(x['unavailable_history_frames'] > 0 for x in samples)
         assert all(x['frames'][-1]['stem'] == x['center_stem'] for x in samples)
-        answers = {'0010': ['11'], '0012': ['22'], '0020': [], '0022': ['11']}
+        answers = {'0010': ['11'], '0012': ['22'], '0014': [], '0016': ['11']}
         metric._records = []
         for x in samples:
             for person in ('P01', 'P02', 'P03'):
@@ -134,7 +190,28 @@ def test_scheme_b():
             raise AssertionError('missing CVAA result unexpectedly admitted')
         except ValueError as exc:
             assert 'lack CVAA top actor' in str(exc)
-        print('PASS: selection 2+2; padded history; paired matching; 3-rater consensus; CI and coverage')
+        # Regression: matched negative sampling must follow the positive real-history
+        # distribution, not simply the first N negative frames after shuffling.
+        assert [history_stratum(x) for x in (40, 21, 1, 0)] == [
+            'complete_40', 'partial_20_39', 'short_1_19', 'none_0']
+        toy_keys = [('route', '%04d' % i) for i in range(10)]
+        toy_history = [1, 1, 1, 40, 1, 25, 40, 40, 1, 40]
+        def toy_preparer(k, group, root, cfg, cache, min_real_history):
+            i = int(k[1]); return {'real_history_frames': toy_history[i], 'center_stem': k[1]}, None
+        negs, have, rejected = sample_matched_negatives(
+            toy_keys, None, None, {}, 0,
+            {'complete_40': 3, 'partial_20_39': 1, 'short_1_19': 1},
+            preparer=toy_preparer)
+        assert len(negs) == 5 and not rejected
+        from collections import Counter
+        assert Counter(history_stratum(s['real_history_frames']) for s in negs) == {
+            'complete_40': 3, 'partial_20_39': 1, 'short_1_19': 1}
+        # Ensure a quota cannot be silently filled from the wrong history stratum.
+        _negs, _have, _ = sample_matched_negatives(
+            toy_keys, None, None, {}, 0,
+            {'complete_40': 5}, preparer=toy_preparer)
+        assert len(_negs) == 4 and _have['complete_40'] == 4
+        print('PASS: 2+2; LG null-ID; class/pose recovery; paired evaluation; stratified negative sampling')
 
 if __name__ == '__main__':
     test_scheme_b()

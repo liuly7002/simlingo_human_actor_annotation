@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import random
+import math
 from collections import Counter
 from pathlib import Path
 
@@ -107,6 +108,99 @@ def prepare_single(key, group, dataset_root, cfg, cache, min_real_history):
     return rec, None
 
 
+def _canonical_class(value):
+    """Class normalization is used ONLY for same-frame ID recovery. #修改20260720"""
+    cls = str(value or '').lower().replace('vehicle.', '').replace('walker.', '')
+    if any(x in cls for x in ('pedestrian', 'walker', 'person')):
+        return 'pedestrian'
+    if 'motorcycle' in cls or 'motorbike' in cls:
+        return 'motorcycle'
+    if any(x in cls for x in ('bicycle', 'cyclist', 'bike')):
+        return 'bicycle'
+    if any(x in cls for x in ('car', 'truck', 'bus', 'vehicle')):
+        return 'vehicle'
+    if 'cone' in cls:
+        return 'traffic_cone'
+    if any(x in cls for x in ('static', 'obstacle', 'warning', 'barrier')):
+        return 'static_obstacle'
+    return cls
+
+
+def recover_lg_id(lg, candidates, max_distance_m=0.75, isolation_gap_m=0.75):
+    """Recover actor ID only from an UNAMBIGUOUS near-exact class/pose match.
+
+    This does not change LG's selected causal actor. Unresolved actors remain
+    missing predictions (never treated as abstentions). The position must be in
+    the same ego frame as annotation candidates. #修改20260720
+    """
+    sig = lg.get('actor_signature') or {}
+    if not isinstance(sig, dict) or sig.get('x_m') is None or sig.get('y_m') is None or not sig.get('class'):
+        return None, 'no_class_or_pose'
+    try:
+        x, y = float(sig['x_m']), float(sig['y_m'])
+    except (TypeError, ValueError):
+        return None, 'invalid_pose'
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return None, 'invalid_pose'
+    cls = _canonical_class(sig['class'])
+    possibilities = []
+    for actor in candidates:
+        if not actor.get('actor_id') or _canonical_class(actor.get('class')) != cls:
+            continue
+        if actor.get('x_m') is None or actor.get('y_m') is None:
+            continue
+        try:
+            dist = math.hypot(float(actor['x_m'])-x, float(actor['y_m'])-y)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(dist):
+            possibilities.append((dist, str(actor['actor_id'])))
+    possibilities.sort()
+    if not possibilities or possibilities[0][0] > max_distance_m:
+        return None, 'no_pose_match_within_%.2fm' % max_distance_m
+    if len(possibilities) > 1 and possibilities[1][0] - possibilities[0][0] < isolation_gap_m:
+        return None, 'ambiguous_pose_match'
+    return possibilities[0][1], 'unique_class_pose_match'
+
+
+def history_stratum(real_history_frames):
+    # 4s history (40 slots), 2-4s, 0-2s, and none; each group matches exactly.
+    n = int(real_history_frames)
+    if n >= 40:
+        return 'complete_40'
+    if n >= 20:
+        return 'partial_20_39'
+    if n >= 1:
+        return 'short_1_19'
+    return 'none_0'
+
+
+def sample_matched_negatives(negatives, root, cfg, cache, min_real_history,
+                             needed_strata, preparer=prepare_single):
+    """Sample shuffled eligible LG-negative frames until each positive-history quota is met.
+
+    The caller shuffles negatives using a fixed seed. All LG-positive samples are
+    preserved. The comparison remains conditional on the LG-defined cohorts.
+    """
+    needed = Counter(needed_strata)
+    have = Counter()
+    selected = []
+    rejected = []
+    for k in negatives:
+        if all(have[g] >= quota for g, quota in needed.items()):
+            break
+        sample, why = preparer(k, 'lg_negative_random', root, cfg, cache, min_real_history)
+        if sample is None:
+            rejected.append({'route_rel': k[0], 'frame': k[1],
+                             'group': 'lg_negative_random', 'reason': why})
+            continue
+        stratum = history_stratum(sample['real_history_frames'])
+        if have[stratum] < needed[stratum]:
+            selected.append(sample)
+            have[stratum] += 1
+    return selected, have, rejected
+
+
 def make_scheme_b(cfg, keyframes, lg_frames, cvaa_frames, target=147, seed=20261008,
                   min_real_history=0, require_cvaa=True):
     keys = parse_keyframes(keyframes)
@@ -153,17 +247,30 @@ def make_scheme_b(cfg, keyframes, lg_frames, cvaa_frames, target=147, seed=20261
         raise ValueError('Only %d/%d confirmed LG frames annotatable: %s. Do not silently substitute positive frames.' %
                          (len(pos_ok), target, cfg.dataset.work_dir / 'scheme_b_preflight_error.json'))
     samples.extend(pos_ok)
-    neg_ok = []
-    for k in negatives:
-        if len(neg_ok) == target:
-            break
-        sample, why = prepare_single(k, 'lg_negative_random', root, cfg, cache, min_real_history)
-        if sample is None:
-            rejected.append({'route_rel': k[0], 'frame': k[1], 'group': 'lg_negative_random', 'reason': why})
-        else:
-            neg_ok.append(sample)
+    #修改20260720：按正例的真实历史长度分层匹配抽取负例。
+    # 不是从“前 147 个可用随机负例”中取样；那会大量抽到路线初始的短历史帧。
+    # 保留全部 147 个 LG 已确认帧不变；仅从全部 LG 未确认帧中匹配抽样。
+    history_target = Counter(history_stratum(s['real_history_frames']) for s in pos_ok)
+    neg_ok, history_found, hist_rejected = sample_matched_negatives(
+        negatives, root, cfg, cache, min_real_history, history_target,
+        preparer=prepare_single)
+    rejected.extend(hist_rejected)
     if len(neg_ok) < target:
-        raise ValueError('Only %d/%d eligible LG-negative frames after exhausting candidates' % (len(neg_ok), target))
+        missing_strata = {name: count - history_found.get(name, 0)
+                          for name, count in history_target.items()
+                          if history_found.get(name, 0) < count}
+        write_json(cfg.dataset.work_dir / 'scheme_b_preflight_error.json', {
+            'error': 'not_enough_history_matched_negative_frames',
+            'positive_history_strata': dict(history_target),
+            'found_negative_history_strata': dict(history_found),
+            'missing_history_strata': missing_strata,
+            'negative_candidates_examined': len(negatives),
+            'rejections': dict(Counter(r['reason'] for r in hist_rejected)),
+        })
+        raise ValueError('History-matched LG-negative frames unavailable: %s. '
+                         'See scheme_b_preflight_error.json; do not silently change positive frames.'
+                         % missing_strata)
+    assert Counter(history_stratum(s['real_history_frames']) for s in neg_ok) == history_target
     samples.extend(neg_ok)
     rng.shuffle(samples)
     output_preds = []
@@ -173,15 +280,35 @@ def make_scheme_b(cfg, keyframes, lg_frames, cvaa_frames, target=147, seed=20261
         cid = set(str(c['actor_id']) for c in sample['candidates'])
         l = lg.get(k, {})
         c = cvaa.get(k, {})
+        lg_actor_id = l.get('selected_actor_id')
+        recovery_status = 'not_needed'
+        if l.get('has_causal_object') and lg_actor_id is None:
+            lg_actor_id, recovery_status = recover_lg_id(l, sample['candidates'])
+        # A selected actor absent from the annotator's candidate choices cannot
+        # be evaluated fairly. Store both output presence and ID comparability.
+        lg_comparable = bool(l.get('available')) and (not l.get('has_causal_object') or
+                         (lg_actor_id is not None and str(lg_actor_id) in cid))
+        cvaa_actor_id = c.get('selected_actor_id')
+        cvaa_comparable = bool(c.get('available') and cvaa_actor_id is not None and
+                               str(cvaa_actor_id) in cid)
         row = {'sample_id': sample['sample_id'], 'route_rel': k[0], 'frame': k[1],
                'group': sample['evaluation_group'],
-               'lg_available': bool(l.get('available')),
-               'lg_selected_actor_id': l.get('selected_actor_id'),
+               'lg_output_available': bool(l.get('available')),
+               'lg_available': lg_comparable,
+               'lg_selected_actor_id': lg_actor_id,
                'lg_has_causal_object': bool(l.get('has_causal_object')),
-               'cvaa_available': bool(c.get('available')),
-               'cvaa_selected_actor_id': c.get('selected_actor_id'),
+               'lg_actor_id_missing_in_source': bool(l.get('actor_id_missing')),
+               'lg_actor_id_recovery': recovery_status,
+               'cvaa_output_available': bool(c.get('available')),
+               'cvaa_available': cvaa_comparable,
+               'cvaa_selected_actor_id': cvaa_actor_id,
                'cvaa_num_actors': c.get('num_actors')}
         output_preds.append(row)
+        if l.get('actor_id_missing'):
+            mapping_audit.append({'sample_id': sample['sample_id'],
+                                  'group': sample['evaluation_group'],
+                                  'method': 'lg', 'selected_actor_id': lg_actor_id,
+                                  'reason': 'source_id_missing_' + recovery_status})
         for method in ('lg', 'cvaa'):
             actor = row[method + '_selected_actor_id']
             if actor is not None and actor not in cid:
@@ -206,9 +333,23 @@ def make_scheme_b(cfg, keyframes, lg_frames, cvaa_frames, target=147, seed=20261
         'selected_lg_positive': len(pos_ok), 'selected_lg_negative': len(neg_ok),
         'total_samples': len(samples), 'random_seed': seed,
         'min_real_history': min_real_history,
+        'negative_sampling': 'seeded_random_with_positive_history_strata_matching',
+        'positive_history_strata': dict(sorted(history_target.items())),
+        'negative_history_strata': dict(sorted(history_found.items())),
+        'history_strata_matched': dict(history_target) == dict(history_found),
+        'positive_history_min': min(s['real_history_frames'] for s in pos_ok),
+        'negative_history_min': min(s['real_history_frames'] for s in neg_ok),
         'require_cvaa': require_cvaa,
         'missing_history_samples': sum(s['unavailable_history_frames'] > 0 for s in samples),
-        'actor_mapping_mismatches': len(mapping_audit),
+        'actor_mapping_mismatches': sum(r['reason'] == 'actor_not_in_method_neutral_annotation_candidates'
+                                        for r in mapping_audit),
+        'lg_confirmed_missing_id_in_source': sum(bool(lg[k].get('actor_id_missing')) for k in positives),
+        'lg_recovered_actor_id_in_samples': sum(bool(p['lg_actor_id_missing_in_source'] and p['lg_available'])
+                                                 for p in output_preds),
+        'lg_positive_unresolvable_in_samples': sum(p['group'] == 'lg_positive' and not p['lg_available']
+                                                   for p in output_preds),
+        'cvaa_unmappable_in_samples': sum(bool(p['cvaa_output_available']) and not p['cvaa_available']
+                                         for p in output_preds),
         'source_sha256': {str(p): hashlib.sha256(Path(p).read_bytes()).hexdigest()
                           for p in (keyframes, lg_frames, cvaa_frames)},
         'manifest_path': str(cfg.dataset.manifest_path),

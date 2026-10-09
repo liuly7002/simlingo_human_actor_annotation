@@ -29,7 +29,7 @@ render:
   marker_label_gap_px: 10
   top_meters_per_pixel: null
   top_ego_center_x_ratio: 0.5
-  top_ego_center_y_ratio: 0.62
+  top_ego_center_y_ratio: 0.5
   forward_is_up: true
   right_is_right: true
 app:
